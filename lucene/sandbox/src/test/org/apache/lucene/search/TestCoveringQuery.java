@@ -25,6 +25,8 @@ import java.util.List;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field.Store;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
@@ -33,7 +35,9 @@ import org.apache.lucene.index.MultiReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
+import org.apache.lucene.util.TestUtil;
 
 public class TestCoveringQuery extends LuceneTestCase {
 
@@ -154,4 +158,206 @@ public class TestCoveringQuery extends LuceneTestCase {
     r.close();
     dir.close();
   }
+
+  public void testAllQueries() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+    int numDocs = atLeast(30) * 6;
+
+    for (int i = 0; i < numDocs; ++i) {
+      Document doc = new Document();
+      if (i % 2 == 1) {
+        doc.add(new StringField("field", "A", Store.NO));
+        doc.add(new StringField("field", "B", Store.NO));
+        doc.add(new StringField("field", "C", Store.NO));
+      }
+      doc.add(new StringField("field", "D", Store.NO));
+      doc.add(new StringField("field", "E", Store.NO));
+      doc.add(new StringField("field", "F", Store.NO));
+
+      doc.add(new NumericDocValuesField("min_match", 3 + (3 * ( i % 2))));
+      w.addDocument(doc);
+    }
+
+    IndexReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    w.close();
+
+    int iters = atLeast(10);
+    for (int iter = 0; iter < iters; ++iter) {
+      List<Query> queries = new ArrayList<>();
+      if (iter % 2 != 0) {
+        queries.add(new TermQuery(new Term("field", "A")));
+        queries.add(new TermQuery(new Term("field", "B")));
+        queries.add(new TermQuery(new Term("field", "C")));
+      }
+      if (iter % 3 != 0) {
+        queries.add(new TermQuery(new Term("field", "D")));
+      }
+      queries.add(new TermQuery(new Term("field", "E")));
+      queries.add(new TermQuery(new Term("field", "F")));
+
+      Query q = new CoveringQuery(queries, LongValuesSource.fromLongField("min_match"));
+      QueryUtils.check(random(), q, searcher);
+
+      int expected = numDocs;
+      if (iter % 2 == 0 ) {
+        expected = numDocs / 2;
+      }
+      if (iter %3 == 0) {
+        expected = 0;
+      }
+      assertEquals(expected, searcher.count(q));
+
+    }
+
+    r.close();
+    dir.close();
+  }
+
+  public void testAllQueriesMvField() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+    int numDocs = atLeast(30) * 6;
+numDocs=6;
+    for (int i = 0; i < numDocs; ++i) {
+      Document doc = new Document();
+      if (i % 2 == 1) {
+        doc.add(new StringField("field", "A", Store.NO));
+        doc.add(new StringField("field", "B", Store.NO));
+        doc.add(new StringField("field", "C", Store.NO));
+      }
+      doc.add(new StringField("field", "D", Store.NO));
+      doc.add(new StringField("field", "E", Store.NO));
+      doc.add(new StringField("field", "F", Store.NO));
+
+      for (int j=0; j<(3 + (3 * ( i % 2))); j++) {
+        doc.add(new SortedSetDocValuesField("min_match_multi", new BytesRef(TestUtil.randomSimpleString(random(), 4))));
+      }
+      System.out.println((3 + (3 * ( i % 2))));
+      System.out.println(doc);
+      w.addDocument(doc);
+    }
+
+    IndexReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    w.close();
+
+    int iters = atLeast(10);
+    for (int iter = 0; iter < iters; ++iter) {
+      List<Query> queries = new ArrayList<>();
+      if (iter % 2 != 0) {
+        queries.add(new TermQuery(new Term("field", "A")));
+        queries.add(new TermQuery(new Term("field", "B")));
+        queries.add(new TermQuery(new Term("field", "C")));
+      }
+      if (iter % 3 != 0) {
+        queries.add(new TermQuery(new Term("field", "D")));
+      }
+      queries.add(new TermQuery(new Term("field", "E")));
+      queries.add(new TermQuery(new Term("field", "F")));
+
+      Query q = new CoveringQuery(queries, "min_match_multi");
+
+      QueryUtils.check(random(), q, searcher);
+
+      int expected = numDocs;
+      if (iter % 2 == 0 ) {
+        expected = numDocs / 2;
+      }
+      if (iter %3 == 0) {
+        expected = 0;
+      }
+      System.out.println("Queries: " + queries.size());
+      System.out.println("Expected: " + expected);
+      //assertEquals(expected, searcher.count(q));
+      ScoreDoc[] docsResults = searcher.search(q, numDocs).scoreDocs;
+      for (int i=0; i< docsResults.length; i++) {
+        System.out.println("Result " + i + " is " + docsResults[i].doc);
+      }
+      assertEquals(docsResults.length, searcher.count(q));
+      assertEquals(expected, docsResults.length);
+    }
+
+    r.close();
+    dir.close();
+  }
+
+  public void testRandom2() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+    int numDocs = atLeast(200);
+    for (int i = 0; i < numDocs; ++i) {
+      Document doc = new Document();
+      if (random().nextBoolean()) {
+        doc.add(new StringField("field", "A", Store.NO));
+      }
+      if (random().nextBoolean()) {
+        doc.add(new StringField("field", "B", Store.NO));
+      }
+      if (random().nextDouble() > 0.9) {
+        doc.add(new StringField("field", "C", Store.NO));
+      }
+      if (random().nextDouble() > 0.1) {
+        doc.add(new StringField("field", "D", Store.NO));
+      }
+      int minMatch = random().nextInt(6);
+
+      //doc.add(new NumericDocValuesField("min_match", minMatch));
+      for (int j=0; j<minMatch; j++) {
+        doc.add(new SortedSetDocValuesField("min_match_multi", new BytesRef(TestUtil.randomSimpleString(random(), 4))));
+      }
+      w.addDocument(doc);
+    }
+
+    IndexReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    w.close();
+
+    int iters = atLeast(10);
+    for (int iter = 0; iter < iters; ++iter) {
+      List<Query> queries = new ArrayList<>();
+      if (random().nextBoolean()) {
+        queries.add(new TermQuery(new Term("field", "A")));
+      }
+      if (random().nextBoolean()) {
+        queries.add(new TermQuery(new Term("field", "B")));
+      }
+      if (random().nextBoolean()) {
+        queries.add(new TermQuery(new Term("field", "C")));
+      }
+      if (random().nextBoolean()) {
+        queries.add(new TermQuery(new Term("field", "D")));
+      }
+      if (random().nextBoolean()) {
+        queries.add(new TermQuery(new Term("field", "E")));
+      }
+
+      Query q = new CoveringQuery(queries, "min_match_multi");
+      QueryUtils.check(random(), q, searcher);
+
+      for (int i = 1; i < 4; ++i) {
+        BooleanQuery.Builder builder = new BooleanQuery.Builder()
+            .setMinimumNumberShouldMatch(i);
+        for (Query query : queries) {
+          builder.add(query, Occur.SHOULD);
+        }
+        Query q1 = builder.build();
+        Query q2 = new CoveringQuery(queries, LongValuesSource.constant(i));
+        assertEquals(
+            searcher.count(q1),
+            searcher.count(q2));
+      }
+
+      Query filtered = new BooleanQuery.Builder()
+          .add(q, Occur.MUST)
+          .add(new TermQuery(new Term("field", "A")), Occur.MUST)
+          .build();
+      QueryUtils.check(random(), filtered, searcher);
+    }
+
+    r.close();
+    dir.close();
+  }
+
 }

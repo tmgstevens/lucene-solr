@@ -21,12 +21,18 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import org.apache.lucene.index.DocValues;
+import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SortedSetDocValues;
+
 /** A {@link Scorer} whose number of matches is per-document. */
 final class CoveringScorer extends Scorer {
 
   final int numScorers;
   final int maxDoc;
   final LongValues minMatchValues;
+  final LeafReaderContext context;
+  final String minMatchString;
 
   boolean matches; // if true then the doc matches, otherwise we don't know and need to check
   int doc;  // current doc ID
@@ -45,6 +51,27 @@ final class CoveringScorer extends Scorer {
     this.numScorers = scorers.size();
     this.maxDoc = maxDoc;
     this.minMatchValues = minMatchValues;
+    this.minMatchString = null;
+    this.doc = -1;
+    this.context = null;
+
+    subScorers = new DisiPriorityQueue(scorers.size());
+
+    for (Scorer scorer : scorers) {
+      subScorers.add(new DisiWrapper(scorer));
+    }
+
+    this.cost = scorers.stream().map(Scorer::iterator).mapToLong(DocIdSetIterator::cost).sum();
+  }
+
+  CoveringScorer(Weight weight, Collection<Scorer> scorers, String minMatchField, int maxDoc, LeafReaderContext context) {
+    super(weight);
+
+    this.numScorers = scorers.size();
+    this.maxDoc = maxDoc;
+    this.minMatchString = minMatchField;
+    this.minMatchValues = null;
+    this.context = context;
     this.doc = -1;
 
     subScorers = new DisiPriorityQueue(scorers.size());
@@ -125,9 +152,22 @@ final class CoveringScorer extends Scorer {
       if (doc >= maxDoc) {
         // advanceExact may not be called on out-of-range doc ids
         minMatch = 1;
-      } else if (minMatchValues.advanceExact(doc)) {
+      } else if (minMatchValues != null && minMatchValues.advanceExact(doc)) {
         // values < 1 are treated as 1: we require at least one match
         minMatch = Math.max(1, minMatchValues.longValue());
+      } else if(minMatchString != null) {
+        SortedSetDocValues values = DocValues.getSortedSet(context.reader(), minMatchString);
+        if (values.advanceExact(doc)) {
+          minMatch = 0;
+          while (values.nextOrd() != SortedSetDocValues.NO_MORE_ORDS) {
+            minMatch++;
+          }
+          //minMatch = values.getValueCount();
+          //System.out.println("Emitting minMatch = " + minMatch);
+        } else {
+          // this will make sure the document does not match
+          minMatch = Long.MAX_VALUE;
+        }
       } else {
         // this will make sure the document does not match
         minMatch = Long.MAX_VALUE;

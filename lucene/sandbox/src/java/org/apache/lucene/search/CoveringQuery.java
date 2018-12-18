@@ -24,8 +24,10 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Term;
 
 /** A {@link Query} that allows to have a configurable number or required
@@ -38,6 +40,7 @@ public final class CoveringQuery extends Query {
   private final Collection<Query> queries;
   private final LongValuesSource minimumNumberMatch;
   private final int hashCode;
+  private final String minimumNumberField;
 
   /**
    * Sole constructor.
@@ -59,6 +62,18 @@ public final class CoveringQuery extends Query {
     this.queries = new Multiset<>();
     this.queries.addAll(queries);
     this.minimumNumberMatch = Objects.requireNonNull(minimumNumberMatch);
+    this.minimumNumberField = null;
+    this.hashCode = computeHashCode();
+  }
+
+  public CoveringQuery(Collection<Query> queries, String field) {
+    if (queries.size() > BooleanQuery.getMaxClauseCount()) {
+      throw new BooleanQuery.TooManyClauses();
+    }
+    this.queries = new Multiset<>();
+    this.queries.addAll(queries);
+    this.minimumNumberMatch = null;
+    this.minimumNumberField = field;
     this.hashCode = computeHashCode();
   }
 
@@ -85,7 +100,11 @@ public final class CoveringQuery extends Query {
   private int computeHashCode() {
     int h = classHash();
     h = 31 * h + queries.hashCode();
-    h = 31 * h + minimumNumberMatch.hashCode();
+    if (minimumNumberMatch != null) {
+      h = 31 * h + minimumNumberMatch.hashCode();
+    } else {
+      h = 31 * h + minimumNumberField.hashCode();
+    }
     return h;
   }
 
@@ -104,7 +123,12 @@ public final class CoveringQuery extends Query {
       actuallyRewritten |= query != r;
     }
     if (actuallyRewritten) {
-      return new CoveringQuery(rewritten, minimumNumberMatch);
+      if (minimumNumberMatch != null) {
+        return new CoveringQuery(rewritten, minimumNumberMatch);
+      } else {
+        return new CoveringQuery(rewritten, minimumNumberField);
+      }
+
     }
     return super.rewrite(reader);
   }
@@ -115,18 +139,31 @@ public final class CoveringQuery extends Query {
     for (Query query : queries) {
       weights.add(searcher.createWeight(query, scoreMode, boost));
     }
-    return new CoveringWeight(this, weights, minimumNumberMatch.rewrite(searcher));
+    if (minimumNumberMatch != null) {
+      return new CoveringWeight(this, weights, minimumNumberMatch.rewrite(searcher));
+    } else {
+      return new CoveringWeight(this, weights, minimumNumberField);
+    }
   }
 
   private static class CoveringWeight extends Weight {
 
     private final Collection<Weight> weights;
     private final LongValuesSource minimumNumberMatch;
+    private final String minimumNumberField;
 
     CoveringWeight(Query query, Collection<Weight> weights, LongValuesSource minimumNumberMatch) {
       super(query);
       this.weights = weights;
       this.minimumNumberMatch = minimumNumberMatch;
+      this.minimumNumberField = null;
+    }
+
+    CoveringWeight(Query query, Collection<Weight> weights, String minimumNumberField) {
+      super(query);
+      this.weights = weights;
+      this.minimumNumberField = minimumNumberField;
+      this.minimumNumberMatch = null;
     }
 
     @Override
@@ -138,11 +175,26 @@ public final class CoveringQuery extends Query {
 
     @Override
     public Matches matches(LeafReaderContext context, int doc) throws IOException {
-      LongValues minMatchValues = minimumNumberMatch.getValues(context, null);
-      if (minMatchValues.advanceExact(doc) == false) {
-        return null;
+      long minimumNumberMatchVal;
+      if (minimumNumberMatch != null) {
+        LongValues minMatchValues = minimumNumberMatch.getValues(context, null);
+        if (minMatchValues.advanceExact(doc) == false) {
+          return null;
+        }
+        minimumNumberMatchVal = Math.max(1, minMatchValues.longValue());
+      } else {
+        SortedSetDocValues vals = DocValues.getSortedSet(context.reader(), minimumNumberField);
+        if (vals.advanceExact(doc)) {
+          minimumNumberMatchVal = 0;
+          while (vals.nextOrd() != SortedSetDocValues.NO_MORE_ORDS) {
+            minimumNumberMatchVal++;
+          }
+          System.out.println(minimumNumberMatchVal);
+        } else {
+          minimumNumberMatchVal = 1;
+        }
       }
-      final long minimumNumberMatch = Math.max(1, minMatchValues.longValue());
+//System.err.println(minimumNumberMatchVal);
       long matchCount = 0;
       List<Matches> subMatches = new ArrayList<>();
       for (Weight weight : weights) {
@@ -152,7 +204,7 @@ public final class CoveringQuery extends Query {
           subMatches.add(matches);
         }
       }
-      if (matchCount < minimumNumberMatch) {
+      if (matchCount < minimumNumberMatchVal) {
         return null;
       }
       return MatchesUtils.fromSubMatches(subMatches);
@@ -160,11 +212,28 @@ public final class CoveringQuery extends Query {
 
     @Override
     public Explanation explain(LeafReaderContext context, int doc) throws IOException {
-      LongValues minMatchValues = minimumNumberMatch.getValues(context, null);
-      if (minMatchValues.advanceExact(doc) == false) {
-        return Explanation.noMatch("minimumNumberMatch has no value on the current document");
+      LongValues minMatchValues;
+      long minimumNumberMatchValue;
+      if (minimumNumberMatch != null) {
+        minMatchValues = minimumNumberMatch.getValues(context, null);
+        if (minMatchValues.advanceExact(doc) == false) {
+          return Explanation.noMatch("minimumNumberMatch has no value on the current document");
+        }
+        minimumNumberMatchValue = Math.max(1, minMatchValues.longValue());
+      } else {
+        SortedSetDocValues values = DocValues.getSortedSet(context.reader(), minimumNumberField);
+        if (values.advanceExact(doc)) {
+          minimumNumberMatchValue = 0;
+          while (values.nextOrd() != SortedSetDocValues.NO_MORE_ORDS) {
+            minimumNumberMatchValue++;
+          }
+          //minMatch = values.getValueCount();
+          //System.out.println("Emitting minMatch = " + minMatch);
+        } else {
+          // this will make sure the document does not match
+          return Explanation.noMatch("minimumNumberMatch has no value on the current document");
+        }
       }
-      final long minimumNumberMatch = Math.max(1, minMatchValues.longValue());
       int freq = 0;
       double score = 0;
       List<Explanation> subExpls = new ArrayList<>();
@@ -176,7 +245,7 @@ public final class CoveringQuery extends Query {
         }
         subExpls.add(subExpl);
       }
-      if (freq >= minimumNumberMatch) {
+      if (freq >= minimumNumberMatchValue) {
         return Explanation.match((float) score, freq + " matches for " + minimumNumberMatch + " required matches, sum of:", subExpls);
       } else {
         return Explanation.noMatch(freq + " matches for " + minimumNumberMatch + " required matches", subExpls);
@@ -195,12 +264,17 @@ public final class CoveringQuery extends Query {
       if (scorers.isEmpty()) {
         return null;
       }
-      return new CoveringScorer(this, scorers, minimumNumberMatch.getValues(context, null), context.reader().maxDoc());
+      LongValues values = null;
+      if (minimumNumberMatch != null) {
+        return new CoveringScorer(this, scorers, minimumNumberMatch.getValues(context, null), context.reader().maxDoc());
+      } else {
+        return new CoveringScorer(this, scorers, minimumNumberField, context.reader().maxDoc(), context);
+      }
     }
 
     @Override
     public boolean isCacheable(LeafReaderContext ctx) {
-      return minimumNumberMatch.isCacheable(ctx);
+      return false;
     }
 
   }
